@@ -119,8 +119,3 @@ function ROMutate(string MutateString, PlayerController Sender, out string Resul
 
 `endif
 
-DefaultProperties
-{
-    bEarlyInitEpicStats=true
-    bSpectateLateJoinersAfterMatchEnd=true
-}
