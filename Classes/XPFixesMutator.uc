@@ -27,6 +27,18 @@ class XPFixesMutator extends ROMutator
 
 var config bool bEarlyInitEpicStats;
 var config bool bSpectateLateJoinersAfterMatchEnd;
+var config bool bDebugEpicStatsLifecycle;
+var config float DebugEpicStatsPollInterval;
+
+struct DebugEpicPlayerTrack
+{
+    var ROPlayerController ROPC;
+    var EOnlineEnumerationReadState LastReadState;
+    var bool bLoggedReadState;
+    var bool bLoggedLoaded;
+};
+
+var array<DebugEpicPlayerTrack> DebugEpicPlayers;
 
 // Naive check based on ID length. Always 17 for Steam clients.
 // **SHOULD** be less than 17 for all EGS clients.
@@ -42,6 +54,138 @@ function bool ShouldSpectateLateJoiner(ROPlayerController ROPC)
         && ROPC.PlayerReplicationInfo != None
         && WorldInfo.GRI != None
         && WorldInfo.GRI.bMatchIsOver;
+}
+
+function bool ShouldDebugEpicStats(ROPlayerController ROPC)
+{
+    return bDebugEpicStatsLifecycle
+        && ROPC != None
+        && ROPC.PlayerReplicationInfo != None
+        && IsEgsClient(ROPlayerReplicationInfo(ROPC.PlayerReplicationInfo).SteamId64);
+}
+
+function float GetDebugEpicStatsPollInterval()
+{
+    if (DebugEpicStatsPollInterval > 0.0)
+    {
+        return DebugEpicStatsPollInterval;
+    }
+
+    return 1.0;
+}
+
+function string GetStatsReadStateName(EOnlineEnumerationReadState ReadState)
+{
+    return string(GetEnum(enum'EOnlineEnumerationReadState', ReadState));
+}
+
+function int FindDebugEpicPlayer(ROPlayerController ROPC)
+{
+    local int i;
+
+    for (i = 0; i < DebugEpicPlayers.Length; i++)
+    {
+        if (DebugEpicPlayers[i].ROPC == ROPC)
+        {
+            return i;
+        }
+    }
+
+    return INDEX_NONE;
+}
+
+function RemoveDebugEpicPlayer(int Index)
+{
+    DebugEpicPlayers.Remove(Index, 1);
+
+    if (DebugEpicPlayers.Length == 0)
+    {
+        ClearTimer('PollEpicStatsDebug');
+    }
+}
+
+function TrackDebugEpicPlayer(ROPlayerController ROPC)
+{
+    local int Index;
+
+    if (!ShouldDebugEpicStats(ROPC) || FindDebugEpicPlayer(ROPC) != INDEX_NONE)
+    {
+        return;
+    }
+
+    Index = DebugEpicPlayers.Length;
+    DebugEpicPlayers.Length = Index + 1;
+    DebugEpicPlayers[Index].ROPC = ROPC;
+    DebugEpicPlayers[Index].LastReadState = OERS_NotStarted;
+
+    `xpflog("tracking Epic stats lifecycle for"
+        @ ROPC @ ROPC.PlayerReplicationInfo.PlayerName
+        @ "SteamId64" @ ROPlayerReplicationInfo(ROPC.PlayerReplicationInfo).SteamId64
+    );
+
+    SetTimer(GetDebugEpicStatsPollInterval(), true, 'PollEpicStatsDebug');
+}
+
+function PollEpicStatsDebug()
+{
+    local int i;
+    local ROPlayerController ROPC;
+    local ROPlayerReplicationInfo ROPRI;
+    local EOnlineEnumerationReadState ReadState;
+
+    for (i = DebugEpicPlayers.Length - 1; i >= 0; i--)
+    {
+        ROPC = DebugEpicPlayers[i].ROPC;
+        if (ROPC == None || ROPC.bDeleteMe || ROPC.PlayerReplicationInfo == None)
+        {
+            RemoveDebugEpicPlayer(i);
+            continue;
+        }
+
+        ROPRI = ROPlayerReplicationInfo(ROPC.PlayerReplicationInfo);
+        if (ROPC.StatsRead == None)
+        {
+            continue;
+        }
+
+        ReadState = ROPC.StatsRead.UserStatsReceivedState;
+        if (!DebugEpicPlayers[i].bLoggedReadState)
+        {
+            `xpflog("Epic stats reader attached for"
+                @ ROPC.PlayerReplicationInfo.PlayerName
+                @ "SteamId64" @ ROPRI.SteamId64
+                @ "State" @ GetStatsReadStateName(ReadState)
+            );
+
+            DebugEpicPlayers[i].bLoggedReadState = true;
+            DebugEpicPlayers[i].LastReadState = ReadState;
+        }
+        else if (DebugEpicPlayers[i].LastReadState != ReadState)
+        {
+            `xpflog("Epic stats state changed for"
+                @ ROPC.PlayerReplicationInfo.PlayerName
+                @ "SteamId64" @ ROPRI.SteamId64
+                @ "State" @ GetStatsReadStateName(ReadState)
+            );
+
+            DebugEpicPlayers[i].LastReadState = ReadState;
+        }
+
+        if (!DebugEpicPlayers[i].bLoggedLoaded
+            && ReadState == OERS_Done
+            && ROPC.StatsWrite != None)
+        {
+            `xpflog("Epic stats loaded for"
+                @ ROPC.PlayerReplicationInfo.PlayerName
+                @ "SteamId64" @ ROPRI.SteamId64
+                @ "Honor" @ ROPC.StatsWrite.HonorPoints
+                @ "HonorLevel" @ ROPC.StatsWrite.HonorLevel
+                @ "HonorPointsStart" @ ROPC.HonorPointsStart
+            );
+
+            DebugEpicPlayers[i].bLoggedLoaded = true;
+        }
+    }
 }
 
 function ForceLateJoinerToSpectator(ROPlayerController ROPC)
@@ -74,6 +218,8 @@ function NotifyLogin(Controller NewPlayer)
 `endif
 
     ROPC = ROPlayerController(NewPlayer);
+    TrackDebugEpicPlayer(ROPC);
+
     if (ShouldSpectateLateJoiner(ROPC))
     {
         `xpflog("forcing late joiner to spectator during match end for"
@@ -99,6 +245,25 @@ function NotifyLogin(Controller NewPlayer)
     }
 
     super.NotifyLogin(NewPlayer);
+}
+
+function NotifyLogout(Controller Exiting)
+{
+    local int Index;
+    local ROPlayerController ROPC;
+
+    ROPC = ROPlayerController(Exiting);
+    Index = FindDebugEpicPlayer(ROPC);
+    if (Index != INDEX_NONE)
+    {
+        `xpflog("stopping Epic stats lifecycle tracking for"
+            @ ROPC @ ROPC.PlayerReplicationInfo.PlayerName
+        );
+
+        RemoveDebugEpicPlayer(Index);
+    }
+
+    super.NotifyLogout(Exiting);
 }
 
 `if(`isdefined(XPFIXES_DEBUG))
