@@ -25,11 +25,38 @@
 class XPFixesMutator extends ROMutator
     config(Mutator_XPFixes);
 
+var config bool bEarlyInitEpicStats;
+var config bool bSpectateLateJoinersAfterMatchEnd;
+
 // Naive check based on ID length. Always 17 for Steam clients.
 // **SHOULD** be less than 17 for all EGS clients.
 function bool IsEgsClient(string SteamID)
 {
     return Len(SteamID) < 17;
+}
+
+function bool ShouldSpectateLateJoiner(ROPlayerController ROPC)
+{
+    return bSpectateLateJoinersAfterMatchEnd
+        && ROPC != None
+        && ROPC.PlayerReplicationInfo != None
+        && WorldInfo.GRI != None
+        && WorldInfo.GRI.bMatchIsOver;
+}
+
+function ForceLateJoinerToSpectator(ROPlayerController ROPC)
+{
+    if (ROPC == None || ROPC.PlayerReplicationInfo == None)
+    {
+        return;
+    }
+
+    ROPC.PlayerReplicationInfo.bOnlySpectator = true;
+    ROPC.PlayerReplicationInfo.bIsSpectator = true;
+    ROPC.PlayerReplicationInfo.bOutOfLives = true;
+    ROPC.PlayerReplicationInfo.bJoinedAsSpectator = true;
+    ROPC.GotoState('Spectating');
+    ROPC.ClientGotoState('Spectating');
 }
 
 function NotifyLogin(Controller NewPlayer)
@@ -47,7 +74,17 @@ function NotifyLogin(Controller NewPlayer)
 `endif
 
     ROPC = ROPlayerController(NewPlayer);
-    if (ROPC != None
+    if (ShouldSpectateLateJoiner(ROPC))
+    {
+        `xpflog("forcing late joiner to spectator during match end for"
+            @ ROPC @ ROPC.PlayerReplicationInfo.PlayerName
+        );
+
+        ForceLateJoinerToSpectator(ROPC);
+    }
+
+    if (bEarlyInitEpicStats
+        && ROPC != None
         && ROPC.PlayerReplicationInfo != None
         && IsEgsClient(ROPlayerReplicationInfo(ROPC.PlayerReplicationInfo).SteamId64)
         // && ROPC.PlayerReplicationInfo.bEgsClient // TODO: this does not work this early?
@@ -84,4 +121,6 @@ function ROMutate(string MutateString, PlayerController Sender, out string Resul
 
 DefaultProperties
 {
+    bEarlyInitEpicStats=true
+    bSpectateLateJoinersAfterMatchEnd=true
 }
