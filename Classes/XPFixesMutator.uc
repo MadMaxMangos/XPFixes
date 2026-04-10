@@ -284,11 +284,23 @@ function NotifyLogout(Controller Exiting)
 {
     local int Index;
     local ROPlayerController ROPC;
+    local DebugEpicPlayerTrack Track;
 
     ROPC = ROPlayerController(Exiting);
     Index = FindDebugEpicPlayer(ROPC);
     if (Index != INDEX_NONE)
     {
+        Track = DebugEpicPlayers[Index];
+        if (!Track.bLoggedLoaded)
+        {
+            `xpflog("WARNING: Epic client disconnected before stats finished loading for"
+                @ ROPC @ ROPC.PlayerReplicationInfo.PlayerName
+                @ "SteamId64" @ ROPlayerReplicationInfo(ROPC.PlayerReplicationInfo).SteamId64
+                @ "LastState" @ GetStatsReadStateName(Track.LastReadState)
+                @ "HonorPointsStart" @ ROPC.HonorPointsStart
+            );
+        }
+
         `xpflog("stopping Epic stats lifecycle tracking for"
             @ ROPC @ ROPC.PlayerReplicationInfo.PlayerName
         );
