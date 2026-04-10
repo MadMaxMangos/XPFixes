@@ -23,7 +23,7 @@
 // Performs early stats initialization to avoid accidentally
 // resetting stats and experience on EGS clients.
 class XPFixesMutator extends ROMutator
-    config(Mutator_XPFixes);
+    config(Mutator_XPFixes_Config);
 
 var config bool bEarlyInitEpicStats;
 var config bool bSpectateLateJoinersAfterMatchEnd;
@@ -201,6 +201,39 @@ function ForceLateJoinerToSpectator(ROPlayerController ROPC)
     ROPC.PlayerReplicationInfo.bJoinedAsSpectator = true;
     ROPC.GotoState('Spectating');
     ROPC.ClientGotoState('Spectating');
+}
+
+function SyncRuntimeSettingsFromClassDefaults()
+{
+    bEarlyInitEpicStats = class'XPFixesMutator'.default.bEarlyInitEpicStats;
+    bSpectateLateJoinersAfterMatchEnd = class'XPFixesMutator'.default.bSpectateLateJoinersAfterMatchEnd;
+    bDebugEpicStatsLifecycle = class'XPFixesMutator'.default.bDebugEpicStatsLifecycle;
+    DebugEpicStatsPollInterval = class'XPFixesMutator'.default.DebugEpicStatsPollInterval;
+}
+
+function PreBeginPlay()
+{
+    super.PreBeginPlay();
+    SyncRuntimeSettingsFromClassDefaults();
+}
+
+simulated event PostBeginPlay()
+{
+    super.PostBeginPlay();
+
+    `xpflog("config defaults:"
+        @ "bEarlyInitEpicStats=" $ class'XPFixesMutator'.default.bEarlyInitEpicStats
+        @ "bSpectateLateJoinersAfterMatchEnd=" $ class'XPFixesMutator'.default.bSpectateLateJoinersAfterMatchEnd
+        @ "bDebugEpicStatsLifecycle=" $ class'XPFixesMutator'.default.bDebugEpicStatsLifecycle
+        @ "DebugEpicStatsPollInterval=" $ class'XPFixesMutator'.default.DebugEpicStatsPollInterval
+    );
+
+    `xpflog("config runtime:"
+        @ "bEarlyInitEpicStats=" $ bEarlyInitEpicStats
+        @ "bSpectateLateJoinersAfterMatchEnd=" $ bSpectateLateJoinersAfterMatchEnd
+        @ "bDebugEpicStatsLifecycle=" $ bDebugEpicStatsLifecycle
+        @ "DebugEpicStatsPollInterval=" $ DebugEpicStatsPollInterval
+    );
 }
 
 function NotifyLogin(Controller NewPlayer)
