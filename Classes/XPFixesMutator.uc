@@ -30,6 +30,17 @@ var config bool bSpectateLateJoinersAfterMatchEnd;
 var config bool bDebugEpicStatsLifecycle;
 var config float DebugEpicStatsPollInterval;
 
+var config bool bFixHonorLevel;
+var config float HonorLevelFixPollInterval;
+var config float HonorLevelFixTimeout;
+
+struct HonorLevelFixTrack
+{
+    var ROPlayerController ROPC;
+    var float TrackStartTime;
+};
+var array<HonorLevelFixTrack> HonorLevelFixPlayers;
+
 struct DebugEpicPlayerTrack
 {
     var ROPlayerController ROPC;
@@ -209,6 +220,9 @@ function SyncRuntimeSettingsFromClassDefaults()
     bSpectateLateJoinersAfterMatchEnd = class'XPFixesMutator'.default.bSpectateLateJoinersAfterMatchEnd;
     bDebugEpicStatsLifecycle = class'XPFixesMutator'.default.bDebugEpicStatsLifecycle;
     DebugEpicStatsPollInterval = class'XPFixesMutator'.default.DebugEpicStatsPollInterval;
+    bFixHonorLevel = class'XPFixesMutator'.default.bFixHonorLevel;
+    HonorLevelFixPollInterval = class'XPFixesMutator'.default.HonorLevelFixPollInterval;
+    HonorLevelFixTimeout = class'XPFixesMutator'.default.HonorLevelFixTimeout;
 }
 
 function PreBeginPlay()
@@ -226,6 +240,9 @@ simulated event PostBeginPlay()
         @ "bSpectateLateJoinersAfterMatchEnd=" $ class'XPFixesMutator'.default.bSpectateLateJoinersAfterMatchEnd
         @ "bDebugEpicStatsLifecycle=" $ class'XPFixesMutator'.default.bDebugEpicStatsLifecycle
         @ "DebugEpicStatsPollInterval=" $ class'XPFixesMutator'.default.DebugEpicStatsPollInterval
+        @ "bFixHonorLevel=" $ class'XPFixesMutator'.default.bFixHonorLevel
+        @ "HonorLevelFixPollInterval=" $ class'XPFixesMutator'.default.HonorLevelFixPollInterval
+        @ "HonorLevelFixTimeout=" $ class'XPFixesMutator'.default.HonorLevelFixTimeout
     );
 
     `xpflog("config runtime:"
@@ -233,7 +250,153 @@ simulated event PostBeginPlay()
         @ "bSpectateLateJoinersAfterMatchEnd=" $ bSpectateLateJoinersAfterMatchEnd
         @ "bDebugEpicStatsLifecycle=" $ bDebugEpicStatsLifecycle
         @ "DebugEpicStatsPollInterval=" $ DebugEpicStatsPollInterval
+        @ "bFixHonorLevel=" $ bFixHonorLevel
+        @ "HonorLevelFixPollInterval=" $ HonorLevelFixPollInterval
+        @ "HonorLevelFixTimeout=" $ HonorLevelFixTimeout
     );
+}
+
+function float GetHonorLevelFixPollInterval()
+{
+    if (HonorLevelFixPollInterval > 0.0)
+    {
+        return HonorLevelFixPollInterval;
+    }
+
+    return 1.5;
+}
+
+function float GetHonorLevelFixTimeout()
+{
+    if (HonorLevelFixTimeout > 0.0)
+    {
+        return HonorLevelFixTimeout;
+    }
+
+    return 30.0;
+}
+
+function int FindHonorLevelFixPlayer(ROPlayerController ROPC)
+{
+    local int i;
+
+    for (i = 0; i < HonorLevelFixPlayers.Length; i++)
+    {
+        if (HonorLevelFixPlayers[i].ROPC == ROPC)
+        {
+            return i;
+        }
+    }
+
+    return INDEX_NONE;
+}
+
+function RemoveHonorLevelFixPlayer(int Index)
+{
+    HonorLevelFixPlayers.Remove(Index, 1);
+
+    if (HonorLevelFixPlayers.Length == 0)
+    {
+        ClearTimer('PollHonorLevelFix');
+    }
+}
+
+function TrackHonorLevelFixPlayer(ROPlayerController ROPC)
+{
+    local int Index;
+
+    if (!bFixHonorLevel
+        || ROPC == None
+        || ROPC.PlayerReplicationInfo == None
+        || ROPC.PlayerReplicationInfo.bBot
+        || FindHonorLevelFixPlayer(ROPC) != INDEX_NONE)
+    {
+        return;
+    }
+
+    Index = HonorLevelFixPlayers.Length;
+    HonorLevelFixPlayers.Length = Index + 1;
+    HonorLevelFixPlayers[Index].ROPC = ROPC;
+    HonorLevelFixPlayers[Index].TrackStartTime = WorldInfo.TimeSeconds;
+
+    `xpflog("tracking HonorLevel fix for"
+        @ ROPC @ ROPC.PlayerReplicationInfo.PlayerName
+    );
+
+    SetTimer(GetHonorLevelFixPollInterval(), true, 'PollHonorLevelFix');
+}
+
+function PollHonorLevelFix()
+{
+    local int i;
+    local ROPlayerController ROPC;
+    local ROPlayerReplicationInfo ROPRI;
+    local byte StatsHonorLevel;
+
+    for (i = HonorLevelFixPlayers.Length - 1; i >= 0; i--)
+    {
+        ROPC = HonorLevelFixPlayers[i].ROPC;
+        if (ROPC == None || ROPC.bDeleteMe || ROPC.PlayerReplicationInfo == None)
+        {
+            RemoveHonorLevelFixPlayer(i);
+            continue;
+        }
+
+        ROPRI = ROPlayerReplicationInfo(ROPC.PlayerReplicationInfo);
+        if (ROPRI == None)
+        {
+            RemoveHonorLevelFixPlayer(i);
+            continue;
+        }
+
+        // Check timeout.
+        if (WorldInfo.TimeSeconds - HonorLevelFixPlayers[i].TrackStartTime > GetHonorLevelFixTimeout())
+        {
+            `xpflog("HonorLevel fix timed out for"
+                @ ROPC.PlayerReplicationInfo.PlayerName
+                @ "PRI.HonorLevel=" $ ROPRI.HonorLevel
+            );
+            RemoveHonorLevelFixPlayer(i);
+            continue;
+        }
+
+        // Wait for stats to finish loading.
+        if (ROPC.StatsRead == None
+            || ROPC.StatsRead.UserStatsReceivedState != OERS_Done
+            || ROPC.StatsWrite == None)
+        {
+            continue;
+        }
+
+        StatsHonorLevel = byte(ROPC.StatsWrite.HonorLevel);
+
+        // If PRI already has a valid level, we're done.
+        if (ROPRI.HonorLevel != 0 && ROPRI.HonorLevel != 255)
+        {
+            RemoveHonorLevelFixPlayer(i);
+            continue;
+        }
+
+        // Stats loaded but HonorLevel is 0 in StatsWrite too — nothing to fix.
+        if (StatsHonorLevel == 0)
+        {
+            `xpflog("HonorLevel fix: StatsWrite.HonorLevel is also 0 for"
+                @ ROPC.PlayerReplicationInfo.PlayerName
+                $ ", skipping"
+            );
+            RemoveHonorLevelFixPlayer(i);
+            continue;
+        }
+
+        // Fix: server-side set the correct HonorLevel on the PRI.
+        `xpflog("HonorLevel fix: correcting"
+            @ ROPC.PlayerReplicationInfo.PlayerName
+            @ "from" @ ROPRI.HonorLevel
+            @ "to" @ StatsHonorLevel
+        );
+        ROPRI.HonorLevel = StatsHonorLevel;
+        RemoveHonorLevelFixPlayer(i);
+    }
 }
 
 function NotifyLogin(Controller NewPlayer)
@@ -251,6 +414,7 @@ function NotifyLogin(Controller NewPlayer)
 `endif
 
     ROPC = ROPlayerController(NewPlayer);
+    TrackHonorLevelFixPlayer(ROPC);
     TrackDebugEpicPlayer(ROPC);
 
     if (ShouldSpectateLateJoiner(ROPC))
@@ -287,6 +451,13 @@ function NotifyLogout(Controller Exiting)
     local DebugEpicPlayerTrack Track;
 
     ROPC = ROPlayerController(Exiting);
+
+    Index = FindHonorLevelFixPlayer(ROPC);
+    if (Index != INDEX_NONE)
+    {
+        RemoveHonorLevelFixPlayer(Index);
+    }
+
     Index = FindDebugEpicPlayer(ROPC);
     if (Index != INDEX_NONE)
     {
