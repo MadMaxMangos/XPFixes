@@ -55,7 +55,7 @@ var array<DebugEpicPlayerTrack> DebugEpicPlayers;
 // **SHOULD** be less than 17 for all EGS clients.
 function bool IsEgsClient(string SteamID)
 {
-    return Len(SteamID) < 17;
+    return Len(SteamID) > 0 && Len(SteamID) < 17;
 }
 
 function bool ShouldSpectateLateJoiner(ROPlayerController ROPC)
@@ -404,13 +404,16 @@ function NotifyLogin(Controller NewPlayer)
     local ROPlayerController ROPC;
 
 `if(`isdefined(XPFIXES_DEBUG))
-    `xpflog("NewPlayer:" @ NewPlayer
-        @ "PC" @ PlayerController(NewPlayer)
-        @ "PRI" @ PlayerController(NewPlayer).PlayerReplicationInfo
-        @ "SteamId64" @ ROPlayerReplicationInfo(NewPlayer.PlayerReplicationInfo).SteamId64
-        @ "bEgsClient" @ PlayerController(NewPlayer).PlayerReplicationInfo.bEgsClient
-        @ "IsEgsClient" @ IsEgsClient(ROPlayerReplicationInfo(NewPlayer.PlayerReplicationInfo).SteamId64)
-    );
+    if (PlayerController(NewPlayer) != None && NewPlayer.PlayerReplicationInfo != None)
+    {
+        `xpflog("NewPlayer:" @ NewPlayer
+            @ "PC" @ PlayerController(NewPlayer)
+            @ "PRI" @ PlayerController(NewPlayer).PlayerReplicationInfo
+            @ "SteamId64" @ ROPlayerReplicationInfo(NewPlayer.PlayerReplicationInfo).SteamId64
+            @ "bEgsClient" @ PlayerController(NewPlayer).PlayerReplicationInfo.bEgsClient
+            @ "IsEgsClient" @ IsEgsClient(ROPlayerReplicationInfo(NewPlayer.PlayerReplicationInfo).SteamId64)
+        );
+    }
 `endif
 
     ROPC = ROPlayerController(NewPlayer);
@@ -462,7 +465,7 @@ function NotifyLogout(Controller Exiting)
     if (Index != INDEX_NONE)
     {
         Track = DebugEpicPlayers[Index];
-        if (!Track.bLoggedLoaded)
+        if (!Track.bLoggedLoaded && ROPC.PlayerReplicationInfo != None)
         {
             `xpflog("WARNING: Epic client disconnected before stats finished loading for"
                 @ ROPC @ ROPC.PlayerReplicationInfo.PlayerName
@@ -473,7 +476,8 @@ function NotifyLogout(Controller Exiting)
         }
 
         `xpflog("stopping Epic stats lifecycle tracking for"
-            @ ROPC @ ROPC.PlayerReplicationInfo.PlayerName
+            @ ROPC
+            @ (ROPC.PlayerReplicationInfo != None ? ROPC.PlayerReplicationInfo.PlayerName : "unknown")
         );
 
         RemoveDebugEpicPlayer(Index);
