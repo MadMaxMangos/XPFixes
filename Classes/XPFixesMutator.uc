@@ -321,6 +321,7 @@ function TrackHonorLevelFixPlayer(ROPlayerController ROPC)
 
     `xpflog("tracking HonorLevel fix for"
         @ ROPC @ ROPC.PlayerReplicationInfo.PlayerName
+        @ "SteamId64" @ ROPlayerReplicationInfo(ROPC.PlayerReplicationInfo).SteamId64
     );
 
     SetTimer(GetHonorLevelFixPollInterval(), true, 'PollHonorLevelFix');
@@ -354,6 +355,7 @@ function PollHonorLevelFix()
         {
             `xpflog("HonorLevel fix timed out for"
                 @ ROPC.PlayerReplicationInfo.PlayerName
+                @ "SteamId64" @ ROPRI.SteamId64
                 @ "PRI.HonorLevel=" $ ROPRI.HonorLevel
             );
             RemoveHonorLevelFixPlayer(i);
@@ -382,6 +384,7 @@ function PollHonorLevelFix()
         {
             `xpflog("HonorLevel fix: StatsWrite.HonorLevel is also 0 for"
                 @ ROPC.PlayerReplicationInfo.PlayerName
+                @ "SteamId64" @ ROPRI.SteamId64
                 $ ", skipping"
             );
             RemoveHonorLevelFixPlayer(i);
@@ -391,6 +394,7 @@ function PollHonorLevelFix()
         // Fix: server-side set the correct HonorLevel on the PRI.
         `xpflog("HonorLevel fix: correcting"
             @ ROPC.PlayerReplicationInfo.PlayerName
+            @ "SteamId64" @ ROPRI.SteamId64
             @ "from" @ ROPRI.HonorLevel
             @ "to" @ StatsHonorLevel
         );
@@ -424,6 +428,7 @@ function NotifyLogin(Controller NewPlayer)
     {
         `xpflog("forcing late joiner to spectator during match end for"
             @ ROPC @ ROPC.PlayerReplicationInfo.PlayerName
+            @ "SteamId64" @ ROPlayerReplicationInfo(ROPC.PlayerReplicationInfo).SteamId64
         );
 
         ForceLateJoinerToSpectator(ROPC);
