@@ -372,6 +372,53 @@ function PollHonorLevelFix()
 
         StatsHonorLevel = byte(ROPC.StatsWrite.HonorLevel);
 
+        // -------------------------------------------------------------------
+        // OPTIONAL XP CORRECTION (disabled pending publisher approval).
+        //
+        // Some players have been affected by a bug that leaves their stored
+        // HonorPoints as a large negative value (e.g. -1500). Because
+        // ROGameStatsRead.GetHonorLevel returns 0 for any negative input,
+        // these players appear at level 0 forever and any XP they earn is
+        // first consumed clawing back toward zero before it counts.
+        //
+        // The block below would detect that condition once StatsWrite is
+        // loaded and award a one-shot correction equal to -HonorPoints,
+        // bringing the stored total back to 0. HonorPointsStart is patched
+        // in lock-step so the AAR progress bar reads Start=0 / End=earned
+        // instead of showing the bugged baseline. We then flush immediately
+        // via WriteStats + FlushOnlineStats so the correction survives a
+        // rage-quit or server crash before match end.
+        //
+        // Left commented out: awarding XP via a mutator is a publisher
+        // policy decision, and mis-detection would over-reward a player
+        // whose negative value is legitimate (e.g. future anti-cheat
+        // clawback). Enable only with explicit sign-off.
+        // -------------------------------------------------------------------
+        /*
+        if (ROPC.StatsWrite.HonorPoints < 0)
+        {
+            `xpflog("HonorPoints fix: correcting"
+                @ ROPC.PlayerReplicationInfo.PlayerName
+                @ "SteamId64" @ ROPRI.SteamId64
+                @ "from" @ ROPC.StatsWrite.HonorPoints
+                @ "to 0 (delta" @ (-ROPC.StatsWrite.HonorPoints) $ ")"
+            );
+            ROPC.StatsWrite.IncrementIntStat(`STATID_Honor, -ROPC.StatsWrite.HonorPoints);
+            ROPC.StatsWrite.UpdateHonorLevel();
+            ROPC.HonorPointsStart = ROPC.StatsWrite.HonorPoints;
+            StatsHonorLevel = byte(ROPC.StatsWrite.HonorLevel);
+
+            ROPC.WriteStats();
+            if (WorldInfo.GRI != None && WorldInfo.Game != None
+                && ROGameInfo(WorldInfo.Game) != None
+                && ROGameInfo(WorldInfo.Game).OnlineSub != None
+                && ROGameInfo(WorldInfo.Game).OnlineSub.StatsInterface != None)
+            {
+                ROGameInfo(WorldInfo.Game).OnlineSub.StatsInterface.FlushOnlineStats('Game');
+            }
+        }
+        */
+
         // If PRI already has a valid level, we're done.
         if (ROPRI.HonorLevel != 0 && ROPRI.HonorLevel != 255)
         {
