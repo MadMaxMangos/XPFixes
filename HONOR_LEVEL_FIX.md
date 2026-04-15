@@ -76,7 +76,7 @@ if (StatsRead != None && StatsRead.UserStatsReceivedState == OERS_Done)
 }
 ```
 
-**Secondary fix -- belt-and-braces:**
+**Secondary fix -- hardening:**
 
 **Option C: Make the RPC reliable.** Change `SetHonorLevel` from `unreliable server` to `reliable server` so the correct value isn't lost to packet drops. The dev comment says "unreliable because it's called quite a bit" but it's a single byte -- the overhead is negligible. This alone does **not** fix the bug (the initial bad `0` still gets sent), but it guarantees recovery once stats load.
 
