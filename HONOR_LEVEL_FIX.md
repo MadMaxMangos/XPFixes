@@ -51,15 +51,23 @@ By the time a player respawns, the async stats read has long completed. `StatsWr
 
 ## Proper Client-Side Fix
 
-If the client could be patched, either of these would resolve it:
+The bug has two distinct parts, and the fixes have different priorities:
 
-### Option A: Delay the timer
+### Part 1: Client sends `0` because stats aren't loaded yet (primary cause)
 
-Move the `SetTimer(1.0, true, 'UpdateStats')` from `InitializeStats()` into the `OnStatsInitialized` callback so `UpdateStats` never fires before stats are loaded.
+The 1-second `UpdateStats` timer fires before the async stats read finishes. At that point `StatsWrite.HonorLevel` is still `0` (default int), so the client sends `SetHonorLevel(0)` to the server. **Reliable vs unreliable makes no difference here** -- the client is sending bad data regardless.
 
-### Option B: Guard inside UpdateStats
+### Part 2: Correct value can be lost to packet drops (secondary)
 
-At line 8037, don't call `SetHonorLevel` if stats haven't finished loading:
+Once stats finally load, the client sends `SetHonorLevel(47)` every tick. With `unreliable`, those packets can drop and the server stays stuck at `0`. With `reliable`, the correct value is guaranteed to eventually arrive.
+
+### Fix priority
+
+**Main fix -- prevent the bad send (either of these solves the root cause):**
+
+**Option A: Delay the timer.** Move the `SetTimer(1.0, true, 'UpdateStats')` from `InitializeStats()` into the `OnStatsInitialized` callback so `UpdateStats` never fires before stats are loaded.
+
+**Option B: Guard inside UpdateStats.** At line 8037, don't call `SetHonorLevel` if stats haven't finished loading:
 
 ```
 if (StatsRead != None && StatsRead.UserStatsReceivedState == OERS_Done)
@@ -68,9 +76,55 @@ if (StatsRead != None && StatsRead.UserStatsReceivedState == OERS_Done)
 }
 ```
 
-### Option C: Make the RPC reliable
+**Secondary fix -- belt-and-braces:**
 
-Change `SetHonorLevel` from `unreliable server` to `reliable server` so the correct value isn't lost to packet drops. The dev comment says "unreliable because it's called quite a bit" but it's a single byte -- the overhead is negligible.
+**Option C: Make the RPC reliable.** Change `SetHonorLevel` from `unreliable server` to `reliable server` so the correct value isn't lost to packet drops. The dev comment says "unreliable because it's called quite a bit" but it's a single byte -- the overhead is negligible. This alone does **not** fix the bug (the initial bad `0` still gets sent), but it guarantees recovery once stats load.
+
+### TL;DR
+
+The root cause is the timer firing too early, not the unreliable RPC. Options A or B are the real fixes. Option C is good hardening on top.
+
+## Related: Stat Reset Risk
+
+The same timing race condition can cause **actual stat resets** (permanent loss of HonorLevel, XP, etc. on Steam/Epic storage), not just display bugs. The existing XPFixesMutator comment already warns about this:
+
+> "Performs early stats initialization to avoid accidentally resetting stats and experience on EGS clients."
+
+### How the reset happens
+
+`WriteStats` at [ROPlayerController.uc:12940](../../RS2_Src/ROGame/Classes/ROPlayerController.uc) does:
+
+```
+exec function WriteStats(optional bool bOnlySaveAchievements)
+{
+    if (!bOnlySaveAchievements)
+    {
+        UpdateStats();  // writes StatsWrite.HonorLevel into PRI
+    }
+
+    if (OnlineSub != None && StatsWrite != None)
+    {
+        OnlineSub.StatsInterface.WriteOnlineStats('Game', ..., StatsWrite);  // persists to storage
+    }
+}
+```
+
+If `WriteStats` runs before the async stats read completes, `StatsWrite.HonorLevel` is still `0` -- and that zero gets pushed to persistent storage, overwriting the player's real level permanently.
+
+### Display fix does NOT prevent resets
+
+The server-side HonorLevel fix in this mutator corrects `PRI.HonorLevel` on the server (for display), but it does **not** touch `StatsWrite`. If `WriteStats` fires before stats load, the reset has already happened in storage before our poll timer runs.
+
+### What prevents resets
+
+The existing XPFixesMutator features mitigate this:
+
+- `bEarlyInitEpicStats` -- gives the async read a head start so it's more likely done before any write
+- `bSpectateLateJoinersAfterMatchEnd` -- prevents late joiners' stats from being written at all
+
+### The real reset fix
+
+A proper fix would guard `WriteStats` / `WriteOnlineStats` against running when `StatsRead.UserStatsReceivedState != OERS_Done`. This would need to live client-side since `WriteStats` is called from many `exec` / simulated paths that a server mutator can't easily intercept.
 
 ## Server-Side Workaround (XPFixesMutator)
 
