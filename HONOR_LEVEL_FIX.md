@@ -150,11 +150,99 @@ Since the client cannot be patched, `XPFixesMutator` includes a server-side work
 In `ROMutator_XPFixes_Config.ini`:
 
 ```ini
-bFixHonorLevel=true              ; Enable/disable the fix
-HonorLevelFixPollInterval=1.5    ; Seconds between checks
-HonorLevelFixTimeout=30.0        ; Give up after this many seconds
+bFixHonorLevel=true                  ; Enable/disable the fix
+HonorLevelFixPollInterval=1.5        ; Seconds between checks per tracked player
+HonorLevelFixTimeout=30.0            ; Give up tracking a player after this many seconds
+HonorLevelFixOutageThreshold=5       ; Consecutive timeouts with zero corrections before a WARNING is emitted
+HonorLevelFixHealthProbeInterval=60.0 ; Seconds between server-wide stats health probes (0 disables)
 ```
 
 ### Limitation
 
 There is still a brief window (1-3 seconds after joining) where a player may appear as level 0 before the server-side fix kicks in. This is unavoidable without a client patch.
+
+## Observed Failure Mode: Server-Wide Stats Outage (2026-04-19)
+
+On 2026-04-19 the fix went silent on Mekong at **01:38:16** and did not resume until the server process was manually restarted at **14:15:09** — a ~12.5 hour gap during which many joiners were stuck at level 0 / 255. A campaign reset was performed at restart; only the process restart actually recovered the fix.
+
+### Symptom operators will see
+
+- Correction log lines stop entirely.
+- `tracking HonorLevel fix` and `HonorLevel fix timed out` log lines continue at a normal rate.
+- Joiners show as level 0 or 255 next to their name across every player and across map changes.
+- Splunk "Recent HonorLevel Corrections" dashboard shows a clean gap (confirmed on 2026-04-19: Sigma 255→61 at 01:38:16, then nothing until Hazmatchik 255→17 at 14:15:09).
+
+### How to distinguish a mutator bug from a wedged OnlineSubsystem
+
+If timeout events keep firing and no correction events appear over many minutes across every player, the mutator is healthy. The compound guard in `PollHonorLevelFix` is failing for every player:
+
+- `ROPC.StatsRead == None`, or
+- `StatsWrite == None`, or
+- `StatsRead.UserStatsReceivedState != OERS_Done`, or
+- `StatsWrite.HonorLevel == 0`.
+
+A genuinely-new level-0 account explains individuals, not every player for hours. The fourth condition being true for everyone means the server-side OnlineSubsystem stats read path is wedged — most likely a Steam/Epic backend transient, a stuck async read that never completes, or an OSS state that won't recover. The 2026-04-19 incident correlated with a ~4% Steam connection-manager outage in the same window, which is consistent with the wedged-OSS theory.
+
+### Recovery
+
+- **Confirmed-good**: restart the server process.
+- **Not sufficient**: map change, `restartmap`, campaign reset, or anything reachable from UnrealScript.
+
+### Why the mutator cannot self-recover
+
+UnrealScript cannot re-initialize the native `OnlineSubsystem`, cannot force a fresh stats read at the subsystem level, and cannot rebuild the `StatsRead` / `StatsWrite` objects owned by each `ROPlayerController`. Once the OSS is in a bad state, every downstream async read it hands out will stay stuck until the process restarts.
+
+## Diagnostics and Outage Detection
+
+The mutator emits three additional log signals so the next incident is self-diagnosing instead of needing 12 hours of hindsight:
+
+### 1. Per-timeout diagnostic
+
+Every `HonorLevel fix timed out` line now includes the exact state of all four guard conditions at the moment of timeout:
+
+```
+HonorLevel fix timed out for PlayerName SteamId64 ... PRI.HonorLevel=255 StatsRead=present StatsWrite=present ReadState=OERS_InProgress StatsWrite.HonorLevel=N/A
+```
+
+During a wedged-OSS outage, every timeout line will show the same pattern (e.g. `ReadState=OERS_InProgress` forever, or `StatsRead=None` for every player). That pattern by itself is diagnostic.
+
+### 2. Mass-failure WARNING
+
+After `HonorLevelFixOutageThreshold` (default 5) consecutive player timeouts with zero successful corrections, the mutator logs a single prominent line:
+
+```
+WARNING: HonorLevel fix appears wedged - N consecutive timeouts with 0 corrections. Probable OnlineSubsystem stats outage - server process restart may be required.
+```
+
+Splunk / ops tooling should alert on the `WARNING: HonorLevel fix appears wedged` string. The warning de-dupes until the next successful correction, at which point the mutator logs `HonorLevel fix recovered: stats subsystem responding again` and arms again. Any of the three success paths (PRI already valid, StatsWrite HonorLevel genuinely 0, correction applied) counts as a recovery.
+
+### 3. Periodic health probe
+
+Every `HonorLevelFixHealthProbeInterval` seconds (default 60) the mutator iterates every non-bot `ROPlayerController` and logs a server-wide summary:
+
+```
+HonorLevel fix health probe: players=12 tracked=2 StatsRead[None=0,Done=10,NotDone=2] StatsWriteNone=0 OSS=OK consecutive_timeouts=0 outage_warned=false
+```
+
+Fields:
+- `players` — non-bot PCs currently connected
+- `tracked` — how many are in the active fix queue
+- `StatsRead[...]` — split of `UserStatsReceivedState`: `None` means the `StatsRead` object itself is missing, `Done` is healthy, `NotDone` is still loading (or stuck)
+- `StatsWriteNone` — how many PCs have no `StatsWrite` object
+- `OSS` — whether the top-level `OnlineSub` / `StatsInterface` references on `ROGameInfo` are present
+- `consecutive_timeouts` / `outage_warned` — current outage-detector state
+
+Set `HonorLevelFixHealthProbeInterval=0.0` to disable the heartbeat if log volume is a concern.
+
+### What a healthy log looks like
+
+- Mix of `tracking HonorLevel fix`, `HonorLevel fix: correcting`, and occasional `HonorLevel fix timed out` lines.
+- Health probe every 60s showing `StatsRead[None=0,Done=N,NotDone=0 or low]`, `OSS=OK`, `consecutive_timeouts=0`, `outage_warned=false`.
+
+### What a wedged-OSS log looks like
+
+- `tracking HonorLevel fix` continues.
+- Every `HonorLevel fix timed out` line shows the same guard state (e.g. `ReadState=OERS_InProgress` for everyone).
+- A single `WARNING: HonorLevel fix appears wedged` line after the threshold is crossed.
+- No `HonorLevel fix: correcting` or `HonorLevel fix recovered` lines.
+- Health probe shows `StatsRead[None=large,...]` or `StatsRead[NotDone=large,...]` for extended periods, and `consecutive_timeouts` growing monotonically.

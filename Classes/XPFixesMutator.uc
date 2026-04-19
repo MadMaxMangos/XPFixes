@@ -33,6 +33,8 @@ var config float DebugEpicStatsPollInterval;
 var config bool bFixHonorLevel;
 var config float HonorLevelFixPollInterval;
 var config float HonorLevelFixTimeout;
+var config int HonorLevelFixOutageThreshold;
+var config float HonorLevelFixHealthProbeInterval;
 
 struct HonorLevelFixTrack
 {
@@ -40,6 +42,9 @@ struct HonorLevelFixTrack
     var float TrackStartTime;
 };
 var array<HonorLevelFixTrack> HonorLevelFixPlayers;
+
+var int ConsecutiveHonorLevelFixTimeouts;
+var bool bHonorLevelFixOutageWarned;
 
 struct DebugEpicPlayerTrack
 {
@@ -223,6 +228,8 @@ function SyncRuntimeSettingsFromClassDefaults()
     bFixHonorLevel = class'XPFixesMutator'.default.bFixHonorLevel;
     HonorLevelFixPollInterval = class'XPFixesMutator'.default.HonorLevelFixPollInterval;
     HonorLevelFixTimeout = class'XPFixesMutator'.default.HonorLevelFixTimeout;
+    HonorLevelFixOutageThreshold = class'XPFixesMutator'.default.HonorLevelFixOutageThreshold;
+    HonorLevelFixHealthProbeInterval = class'XPFixesMutator'.default.HonorLevelFixHealthProbeInterval;
 }
 
 function PreBeginPlay()
@@ -243,6 +250,8 @@ simulated event PostBeginPlay()
         @ "bFixHonorLevel=" $ class'XPFixesMutator'.default.bFixHonorLevel
         @ "HonorLevelFixPollInterval=" $ class'XPFixesMutator'.default.HonorLevelFixPollInterval
         @ "HonorLevelFixTimeout=" $ class'XPFixesMutator'.default.HonorLevelFixTimeout
+        @ "HonorLevelFixOutageThreshold=" $ class'XPFixesMutator'.default.HonorLevelFixOutageThreshold
+        @ "HonorLevelFixHealthProbeInterval=" $ class'XPFixesMutator'.default.HonorLevelFixHealthProbeInterval
     );
 
     `xpflog("config runtime:"
@@ -253,7 +262,14 @@ simulated event PostBeginPlay()
         @ "bFixHonorLevel=" $ bFixHonorLevel
         @ "HonorLevelFixPollInterval=" $ HonorLevelFixPollInterval
         @ "HonorLevelFixTimeout=" $ HonorLevelFixTimeout
+        @ "HonorLevelFixOutageThreshold=" $ HonorLevelFixOutageThreshold
+        @ "HonorLevelFixHealthProbeInterval=" $ HonorLevelFixHealthProbeInterval
     );
+
+    if (bFixHonorLevel && HonorLevelFixHealthProbeInterval > 0.0)
+    {
+        SetTimer(GetHonorLevelFixHealthProbeInterval(), true, 'ProbeHonorLevelFixHealth');
+    }
 }
 
 function float GetHonorLevelFixPollInterval()
@@ -274,6 +290,37 @@ function float GetHonorLevelFixTimeout()
     }
 
     return 30.0;
+}
+
+function int GetHonorLevelFixOutageThreshold()
+{
+    if (HonorLevelFixOutageThreshold > 0)
+    {
+        return HonorLevelFixOutageThreshold;
+    }
+
+    return 5;
+}
+
+function float GetHonorLevelFixHealthProbeInterval()
+{
+    if (HonorLevelFixHealthProbeInterval > 0.0)
+    {
+        return HonorLevelFixHealthProbeInterval;
+    }
+
+    return 60.0;
+}
+
+function NoteHonorLevelFixHealthy()
+{
+    ConsecutiveHonorLevelFixTimeouts = 0;
+
+    if (bHonorLevelFixOutageWarned)
+    {
+        `xpflog("HonorLevel fix recovered: stats subsystem responding again");
+        bHonorLevelFixOutageWarned = false;
+    }
 }
 
 function int FindHonorLevelFixPlayer(ROPlayerController ROPC)
@@ -357,7 +404,23 @@ function PollHonorLevelFix()
                 @ ROPC.PlayerReplicationInfo.PlayerName
                 @ "SteamId64" @ ROPRI.SteamId64
                 @ "PRI.HonorLevel=" $ ROPRI.HonorLevel
+                @ "StatsRead=" $ (ROPC.StatsRead != None ? "present" : "None")
+                @ "StatsWrite=" $ (ROPC.StatsWrite != None ? "present" : "None")
+                @ "ReadState=" $ (ROPC.StatsRead != None ? GetStatsReadStateName(ROPC.StatsRead.UserStatsReceivedState) : "N/A")
+                @ "StatsWrite.HonorLevel=" $ (ROPC.StatsWrite != None ? string(ROPC.StatsWrite.HonorLevel) : "N/A")
             );
+
+            ConsecutiveHonorLevelFixTimeouts++;
+            if (!bHonorLevelFixOutageWarned
+                && ConsecutiveHonorLevelFixTimeouts >= GetHonorLevelFixOutageThreshold())
+            {
+                `xpflog("WARNING: HonorLevel fix appears wedged -"
+                    @ ConsecutiveHonorLevelFixTimeouts
+                    @ "consecutive timeouts with 0 corrections. Probable OnlineSubsystem stats outage - server process restart may be required."
+                );
+                bHonorLevelFixOutageWarned = true;
+            }
+
             RemoveHonorLevelFixPlayer(i);
             continue;
         }
@@ -422,6 +485,7 @@ function PollHonorLevelFix()
         // If PRI already has a valid level, we're done.
         if (ROPRI.HonorLevel != 0 && ROPRI.HonorLevel != 255)
         {
+            NoteHonorLevelFixHealthy();
             RemoveHonorLevelFixPlayer(i);
             continue;
         }
@@ -434,6 +498,7 @@ function PollHonorLevelFix()
                 @ "SteamId64" @ ROPRI.SteamId64
                 $ ", skipping"
             );
+            NoteHonorLevelFixHealthy();
             RemoveHonorLevelFixPlayer(i);
             continue;
         }
@@ -446,8 +511,73 @@ function PollHonorLevelFix()
             @ "to" @ StatsHonorLevel
         );
         ROPRI.HonorLevel = StatsHonorLevel;
+        NoteHonorLevelFixHealthy();
         RemoveHonorLevelFixPlayer(i);
     }
+}
+
+function ProbeHonorLevelFixHealth()
+{
+    local int TotalPlayers, StatsReadNone, StatsReadDone, StatsReadNotDone, StatsWriteNone;
+    local ROPlayerController ROPC;
+    local ROGameInfo ROGI;
+    local string OSSState;
+
+    foreach WorldInfo.AllControllers(class'ROPlayerController', ROPC)
+    {
+        if (ROPC.PlayerReplicationInfo == None || ROPC.PlayerReplicationInfo.bBot)
+        {
+            continue;
+        }
+
+        TotalPlayers++;
+
+        if (ROPC.StatsRead == None)
+        {
+            StatsReadNone++;
+        }
+        else if (ROPC.StatsRead.UserStatsReceivedState == OERS_Done)
+        {
+            StatsReadDone++;
+        }
+        else
+        {
+            StatsReadNotDone++;
+        }
+
+        if (ROPC.StatsWrite == None)
+        {
+            StatsWriteNone++;
+        }
+    }
+
+    ROGI = ROGameInfo(WorldInfo.Game);
+    if (ROGI == None)
+    {
+        OSSState = "ROGameInfo=None";
+    }
+    else if (ROGI.OnlineSub == None)
+    {
+        OSSState = "OnlineSub=None";
+    }
+    else if (ROGI.OnlineSub.StatsInterface == None)
+    {
+        OSSState = "StatsInterface=None";
+    }
+    else
+    {
+        OSSState = "OK";
+    }
+
+    `xpflog("HonorLevel fix health probe:"
+        @ "players=" $ TotalPlayers
+        @ "tracked=" $ HonorLevelFixPlayers.Length
+        @ "StatsRead[None=" $ StatsReadNone $ ",Done=" $ StatsReadDone $ ",NotDone=" $ StatsReadNotDone $ "]"
+        @ "StatsWriteNone=" $ StatsWriteNone
+        @ "OSS=" $ OSSState
+        @ "consecutive_timeouts=" $ ConsecutiveHonorLevelFixTimeouts
+        @ "outage_warned=" $ bHonorLevelFixOutageWarned
+    );
 }
 
 function NotifyLogin(Controller NewPlayer)
