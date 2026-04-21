@@ -45,6 +45,7 @@ var array<HonorLevelFixTrack> HonorLevelFixPlayers;
 
 var int ConsecutiveHonorLevelFixTimeouts;
 var bool bHonorLevelFixOutageWarned;
+var array<ROPlayerController> HonorLevelFixLastUnhealthy;
 
 struct DebugEpicPlayerTrack
 {
@@ -134,7 +135,7 @@ function TrackDebugEpicPlayer(ROPlayerController ROPC)
     DebugEpicPlayers[Index].ROPC = ROPC;
     DebugEpicPlayers[Index].LastReadState = OERS_NotStarted;
 
-    `xpflog("tracking Epic stats lifecycle for"
+    `xpfdebug("tracking Epic stats lifecycle for"
         @ ROPC @ ROPC.PlayerReplicationInfo.PlayerName
         @ "SteamId64" @ ROPlayerReplicationInfo(ROPC.PlayerReplicationInfo).SteamId64
     );
@@ -167,7 +168,7 @@ function PollEpicStatsDebug()
         ReadState = ROPC.StatsRead.UserStatsReceivedState;
         if (!DebugEpicPlayers[i].bLoggedReadState)
         {
-            `xpflog("Epic stats reader attached for"
+            `xpfdebug("Epic stats reader attached for"
                 @ ROPC.PlayerReplicationInfo.PlayerName
                 @ "SteamId64" @ ROPRI.SteamId64
                 @ "State" @ GetStatsReadStateName(ReadState)
@@ -178,7 +179,7 @@ function PollEpicStatsDebug()
         }
         else if (DebugEpicPlayers[i].LastReadState != ReadState)
         {
-            `xpflog("Epic stats state changed for"
+            `xpfdebug("Epic stats state changed for"
                 @ ROPC.PlayerReplicationInfo.PlayerName
                 @ "SteamId64" @ ROPRI.SteamId64
                 @ "State" @ GetStatsReadStateName(ReadState)
@@ -191,7 +192,7 @@ function PollEpicStatsDebug()
             && ReadState == OERS_Done
             && ROPC.StatsWrite != None)
         {
-            `xpflog("Epic stats loaded for"
+            `xpfdebug("Epic stats loaded for"
                 @ ROPC.PlayerReplicationInfo.PlayerName
                 @ "SteamId64" @ ROPRI.SteamId64
                 @ "Honor" @ ROPC.StatsWrite.HonorPoints
@@ -200,6 +201,8 @@ function PollEpicStatsDebug()
             );
 
             DebugEpicPlayers[i].bLoggedLoaded = true;
+            RemoveDebugEpicPlayer(i);
+            continue;
         }
     }
 }
@@ -318,7 +321,7 @@ function NoteHonorLevelFixHealthy()
 
     if (bHonorLevelFixOutageWarned)
     {
-        `xpflog("HonorLevel fix recovered: stats subsystem responding again");
+        `xpfrecovered("HonorLevel fix recovered: stats subsystem responding again");
         bHonorLevelFixOutageWarned = false;
     }
 }
@@ -366,7 +369,7 @@ function TrackHonorLevelFixPlayer(ROPlayerController ROPC)
     HonorLevelFixPlayers[Index].ROPC = ROPC;
     HonorLevelFixPlayers[Index].TrackStartTime = WorldInfo.TimeSeconds;
 
-    `xpflog("tracking HonorLevel fix for"
+    `xpftrack("tracking HonorLevel fix for"
         @ ROPC @ ROPC.PlayerReplicationInfo.PlayerName
         @ "SteamId64" @ ROPlayerReplicationInfo(ROPC.PlayerReplicationInfo).SteamId64
     );
@@ -397,10 +400,19 @@ function PollHonorLevelFix()
             continue;
         }
 
+        // Short-circuit: if PRI already has a valid level, we're done —
+        // don't wait on stats and don't time out during OSS outages.
+        if (ROPRI.HonorLevel != 0 && ROPRI.HonorLevel != 255)
+        {
+            NoteHonorLevelFixHealthy();
+            RemoveHonorLevelFixPlayer(i);
+            continue;
+        }
+
         // Check timeout.
         if (WorldInfo.TimeSeconds - HonorLevelFixPlayers[i].TrackStartTime > GetHonorLevelFixTimeout())
         {
-            `xpflog("HonorLevel fix timed out for"
+            `xpftimeout("HonorLevel fix timed out for"
                 @ ROPC.PlayerReplicationInfo.PlayerName
                 @ "SteamId64" @ ROPRI.SteamId64
                 @ "PRI.HonorLevel=" $ ROPRI.HonorLevel
@@ -414,7 +426,7 @@ function PollHonorLevelFix()
             if (!bHonorLevelFixOutageWarned
                 && ConsecutiveHonorLevelFixTimeouts >= GetHonorLevelFixOutageThreshold())
             {
-                `xpflog("WARNING: HonorLevel fix appears wedged -"
+                `xpfwarn("WARNING: HonorLevel fix appears wedged -"
                     @ ConsecutiveHonorLevelFixTimeouts
                     @ "consecutive timeouts with 0 corrections. Probable OnlineSubsystem stats outage - server process restart may be required."
                 );
@@ -482,14 +494,6 @@ function PollHonorLevelFix()
         }
         */
 
-        // If PRI already has a valid level, we're done.
-        if (ROPRI.HonorLevel != 0 && ROPRI.HonorLevel != 255)
-        {
-            NoteHonorLevelFixHealthy();
-            RemoveHonorLevelFixPlayer(i);
-            continue;
-        }
-
         // Stats loaded but HonorLevel is 0 in StatsWrite too — nothing to fix.
         if (StatsHonorLevel == 0)
         {
@@ -504,7 +508,7 @@ function PollHonorLevelFix()
         }
 
         // Fix: server-side set the correct HonorLevel on the PRI.
-        `xpflog("HonorLevel fix: correcting"
+        `xpfok("HonorLevel fix: correcting"
             @ ROPC.PlayerReplicationInfo.PlayerName
             @ "SteamId64" @ ROPRI.SteamId64
             @ "from" @ ROPRI.HonorLevel
@@ -519,9 +523,14 @@ function PollHonorLevelFix()
 function ProbeHonorLevelFixHealth()
 {
     local int TotalPlayers, StatsReadNone, StatsReadDone, StatsReadNotDone, StatsWriteNone;
+    local int PersistentUnhealthy;
     local ROPlayerController ROPC;
     local ROGameInfo ROGI;
     local string OSSState;
+    local string HealthState;
+    local string ProbeMsg;
+    local array<ROPlayerController> CurrentUnhealthy;
+    local bool bUnhealthy;
 
     foreach WorldInfo.AllControllers(class'ROPlayerController', ROPC)
     {
@@ -531,10 +540,12 @@ function ProbeHonorLevelFixHealth()
         }
 
         TotalPlayers++;
+        bUnhealthy = false;
 
         if (ROPC.StatsRead == None)
         {
             StatsReadNone++;
+            bUnhealthy = true;
         }
         else if (ROPC.StatsRead.UserStatsReceivedState == OERS_Done)
         {
@@ -543,13 +554,26 @@ function ProbeHonorLevelFixHealth()
         else
         {
             StatsReadNotDone++;
+            bUnhealthy = true;
         }
 
         if (ROPC.StatsWrite == None)
         {
             StatsWriteNone++;
+            bUnhealthy = true;
+        }
+
+        if (bUnhealthy)
+        {
+            CurrentUnhealthy.AddItem(ROPC);
+            if (HonorLevelFixLastUnhealthy.Find(ROPC) != INDEX_NONE)
+            {
+                PersistentUnhealthy++;
+            }
         }
     }
+
+    HonorLevelFixLastUnhealthy = CurrentUnhealthy;
 
     ROGI = ROGameInfo(WorldInfo.Game);
     if (ROGI == None)
@@ -569,15 +593,42 @@ function ProbeHonorLevelFixHealth()
         OSSState = "OK";
     }
 
-    `xpflog("HonorLevel fix health probe:"
+    if (OSSState != "OK" || bHonorLevelFixOutageWarned)
+    {
+        HealthState = "FAIL";
+    }
+    else if (PersistentUnhealthy > 0)
+    {
+        HealthState = "DEGRADED";
+    }
+    else
+    {
+        HealthState = "OK";
+    }
+
+    ProbeMsg = "HonorLevel fix health probe:"
+        @ "health=" $ HealthState
         @ "players=" $ TotalPlayers
         @ "tracked=" $ HonorLevelFixPlayers.Length
         @ "StatsRead[None=" $ StatsReadNone $ ",Done=" $ StatsReadDone $ ",NotDone=" $ StatsReadNotDone $ "]"
         @ "StatsWriteNone=" $ StatsWriteNone
+        @ "persistent_unhealthy=" $ PersistentUnhealthy
         @ "OSS=" $ OSSState
         @ "consecutive_timeouts=" $ ConsecutiveHonorLevelFixTimeouts
-        @ "outage_warned=" $ bHonorLevelFixOutageWarned
-    );
+        @ "outage_warned=" $ bHonorLevelFixOutageWarned;
+
+    if (HealthState == "FAIL")
+    {
+        `xpfwarn(ProbeMsg);
+    }
+    else if (HealthState == "DEGRADED")
+    {
+        `xpfdegraded(ProbeMsg);
+    }
+    else
+    {
+        `xpfok(ProbeMsg);
+    }
 }
 
 function NotifyLogin(Controller NewPlayer)
@@ -649,7 +700,7 @@ function NotifyLogout(Controller Exiting)
         Track = DebugEpicPlayers[Index];
         if (!Track.bLoggedLoaded && ROPC.PlayerReplicationInfo != None)
         {
-            `xpflog("WARNING: Epic client disconnected before stats finished loading for"
+            `xpftimeout("WARNING: Epic client disconnected before stats finished loading for"
                 @ ROPC @ ROPC.PlayerReplicationInfo.PlayerName
                 @ "SteamId64" @ ROPlayerReplicationInfo(ROPC.PlayerReplicationInfo).SteamId64
                 @ "LastState" @ GetStatsReadStateName(Track.LastReadState)
