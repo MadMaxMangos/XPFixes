@@ -35,6 +35,7 @@ var config float HonorLevelFixPollInterval;
 var config float HonorLevelFixTimeout;
 var config int HonorLevelFixOutageThreshold;
 var config float HonorLevelFixHealthProbeInterval;
+var config int HonorLevelFixHealthProbeDegradedThreshold;
 
 struct HonorLevelFixTrack
 {
@@ -233,6 +234,7 @@ function SyncRuntimeSettingsFromClassDefaults()
     HonorLevelFixTimeout = class'XPFixesMutator'.default.HonorLevelFixTimeout;
     HonorLevelFixOutageThreshold = class'XPFixesMutator'.default.HonorLevelFixOutageThreshold;
     HonorLevelFixHealthProbeInterval = class'XPFixesMutator'.default.HonorLevelFixHealthProbeInterval;
+    HonorLevelFixHealthProbeDegradedThreshold = class'XPFixesMutator'.default.HonorLevelFixHealthProbeDegradedThreshold;
 }
 
 function PreBeginPlay()
@@ -255,6 +257,7 @@ simulated event PostBeginPlay()
         @ "HonorLevelFixTimeout=" $ class'XPFixesMutator'.default.HonorLevelFixTimeout
         @ "HonorLevelFixOutageThreshold=" $ class'XPFixesMutator'.default.HonorLevelFixOutageThreshold
         @ "HonorLevelFixHealthProbeInterval=" $ class'XPFixesMutator'.default.HonorLevelFixHealthProbeInterval
+        @ "HonorLevelFixHealthProbeDegradedThreshold=" $ class'XPFixesMutator'.default.HonorLevelFixHealthProbeDegradedThreshold
     );
 
     `xpflog("config runtime:"
@@ -267,6 +270,7 @@ simulated event PostBeginPlay()
         @ "HonorLevelFixTimeout=" $ HonorLevelFixTimeout
         @ "HonorLevelFixOutageThreshold=" $ HonorLevelFixOutageThreshold
         @ "HonorLevelFixHealthProbeInterval=" $ HonorLevelFixHealthProbeInterval
+        @ "HonorLevelFixHealthProbeDegradedThreshold=" $ HonorLevelFixHealthProbeDegradedThreshold
     );
 
     if (bFixHonorLevel && HonorLevelFixHealthProbeInterval > 0.0)
@@ -313,6 +317,16 @@ function float GetHonorLevelFixHealthProbeInterval()
     }
 
     return 60.0;
+}
+
+function int GetHonorLevelFixHealthProbeDegradedThreshold()
+{
+    if (HonorLevelFixHealthProbeDegradedThreshold > 0)
+    {
+        return HonorLevelFixHealthProbeDegradedThreshold;
+    }
+
+    return 2;
 }
 
 function NoteHonorLevelFixHealthy()
@@ -597,7 +611,7 @@ function ProbeHonorLevelFixHealth()
     {
         HealthState = "FAIL";
     }
-    else if (PersistentUnhealthy > 0)
+    else if (PersistentUnhealthy >= GetHonorLevelFixHealthProbeDegradedThreshold())
     {
         HealthState = "DEGRADED";
     }
