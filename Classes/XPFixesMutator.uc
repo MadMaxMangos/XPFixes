@@ -36,11 +36,16 @@ var config float HonorLevelFixTimeout;
 var config int HonorLevelFixOutageThreshold;
 var config float HonorLevelFixHealthProbeInterval;
 var config int HonorLevelFixHealthProbeDegradedThreshold;
+var config float HonorLevelFixWatchWindow;
 
 struct HonorLevelFixTrack
 {
     var ROPlayerController ROPC;
     var float TrackStartTime;
+    var bool bFixApplied;
+    var float FixAppliedTime;
+    var byte FixAppliedLevel;
+    var int ReassertCount;
 };
 var array<HonorLevelFixTrack> HonorLevelFixPlayers;
 
@@ -235,6 +240,7 @@ function SyncRuntimeSettingsFromClassDefaults()
     HonorLevelFixOutageThreshold = class'XPFixesMutator'.default.HonorLevelFixOutageThreshold;
     HonorLevelFixHealthProbeInterval = class'XPFixesMutator'.default.HonorLevelFixHealthProbeInterval;
     HonorLevelFixHealthProbeDegradedThreshold = class'XPFixesMutator'.default.HonorLevelFixHealthProbeDegradedThreshold;
+    HonorLevelFixWatchWindow = class'XPFixesMutator'.default.HonorLevelFixWatchWindow;
 }
 
 function PreBeginPlay()
@@ -258,6 +264,7 @@ simulated event PostBeginPlay()
         @ "HonorLevelFixOutageThreshold=" $ class'XPFixesMutator'.default.HonorLevelFixOutageThreshold
         @ "HonorLevelFixHealthProbeInterval=" $ class'XPFixesMutator'.default.HonorLevelFixHealthProbeInterval
         @ "HonorLevelFixHealthProbeDegradedThreshold=" $ class'XPFixesMutator'.default.HonorLevelFixHealthProbeDegradedThreshold
+        @ "HonorLevelFixWatchWindow=" $ class'XPFixesMutator'.default.HonorLevelFixWatchWindow
     );
 
     `xpflog("config runtime:"
@@ -271,6 +278,7 @@ simulated event PostBeginPlay()
         @ "HonorLevelFixOutageThreshold=" $ HonorLevelFixOutageThreshold
         @ "HonorLevelFixHealthProbeInterval=" $ HonorLevelFixHealthProbeInterval
         @ "HonorLevelFixHealthProbeDegradedThreshold=" $ HonorLevelFixHealthProbeDegradedThreshold
+        @ "HonorLevelFixWatchWindow=" $ HonorLevelFixWatchWindow
     );
 
     if (bFixHonorLevel && HonorLevelFixHealthProbeInterval > 0.0)
@@ -327,6 +335,16 @@ function int GetHonorLevelFixHealthProbeDegradedThreshold()
     }
 
     return 2;
+}
+
+function float GetHonorLevelFixWatchWindow()
+{
+    if (HonorLevelFixWatchWindow > 0.0)
+    {
+        return HonorLevelFixWatchWindow;
+    }
+
+    return 30.0;
 }
 
 function NoteHonorLevelFixHealthy()
@@ -411,6 +429,47 @@ function PollHonorLevelFix()
         if (ROPRI == None)
         {
             RemoveHonorLevelFixPlayer(i);
+            continue;
+        }
+
+        // Post-fix watch: after we apply a correction, we don't remove the
+        // player — we keep watching for a regression caused by the game's
+        // unconditional UpdateStats -> SetHonorLevel clobber path. If the PRI
+        // goes back to 0/255 inside the watch window, re-assert and log.
+        if (HonorLevelFixPlayers[i].bFixApplied)
+        {
+            if (WorldInfo.TimeSeconds - HonorLevelFixPlayers[i].FixAppliedTime > GetHonorLevelFixWatchWindow())
+            {
+                if (HonorLevelFixPlayers[i].ReassertCount > 0)
+                {
+                    `xpfok("HonorLevel fix watch complete for"
+                        @ ROPC.PlayerReplicationInfo.PlayerName
+                        @ "SteamId64" @ ROPRI.SteamId64
+                        @ "reasserts=" $ HonorLevelFixPlayers[i].ReassertCount
+                        @ "final_level=" $ ROPRI.HonorLevel
+                    );
+                }
+                RemoveHonorLevelFixPlayer(i);
+                continue;
+            }
+
+            if (ROPRI.HonorLevel == 0 || ROPRI.HonorLevel == 255)
+            {
+                `xpfwarn("HonorLevel fix REGRESSION for"
+                    @ ROPC.PlayerReplicationInfo.PlayerName
+                    @ "SteamId64" @ ROPRI.SteamId64
+                    @ "PRI.HonorLevel=" $ ROPRI.HonorLevel
+                    @ "was_set_to=" $ HonorLevelFixPlayers[i].FixAppliedLevel
+                    @ "time_since_fix=" $ (WorldInfo.TimeSeconds - HonorLevelFixPlayers[i].FixAppliedTime)
+                    @ "prior_reasserts=" $ HonorLevelFixPlayers[i].ReassertCount
+                    @ "StatsRead=" $ (ROPC.StatsRead != None ? "present" : "None")
+                    @ "ReadState=" $ (ROPC.StatsRead != None ? GetStatsReadStateName(ROPC.StatsRead.UserStatsReceivedState) : "N/A")
+                    @ "StatsWrite=" $ (ROPC.StatsWrite != None ? "present" : "None")
+                    @ "StatsWrite.HonorLevel=" $ (ROPC.StatsWrite != None ? string(ROPC.StatsWrite.HonorLevel) : "N/A")
+                );
+                ROPRI.HonorLevel = HonorLevelFixPlayers[i].FixAppliedLevel;
+                HonorLevelFixPlayers[i].ReassertCount++;
+            }
             continue;
         }
 
@@ -530,7 +589,14 @@ function PollHonorLevelFix()
         );
         ROPRI.HonorLevel = StatsHonorLevel;
         NoteHonorLevelFixHealthy();
-        RemoveHonorLevelFixPlayer(i);
+
+        // Enter post-fix watch mode: keep polling this entry so we can detect
+        // and re-assert if the game's UpdateStats -> SetHonorLevel path clobbers
+        // our correction back to 0/255. The entry is removed when the watch
+        // window expires or the player disconnects.
+        HonorLevelFixPlayers[i].bFixApplied = true;
+        HonorLevelFixPlayers[i].FixAppliedTime = WorldInfo.TimeSeconds;
+        HonorLevelFixPlayers[i].FixAppliedLevel = StatsHonorLevel;
     }
 }
 
@@ -538,6 +604,8 @@ function ProbeHonorLevelFixHealth()
 {
     local int TotalPlayers, StatsReadNone, StatsReadDone, StatsReadNotDone, StatsWriteNone;
     local int PersistentUnhealthy;
+    local int ActiveTracked, WatchTracked, TotalReasserts;
+    local int j;
     local ROPlayerController ROPC;
     local ROGameInfo ROGI;
     local string OSSState;
@@ -545,6 +613,19 @@ function ProbeHonorLevelFixHealth()
     local string ProbeMsg;
     local array<ROPlayerController> CurrentUnhealthy;
     local bool bUnhealthy;
+
+    for (j = 0; j < HonorLevelFixPlayers.Length; j++)
+    {
+        if (HonorLevelFixPlayers[j].bFixApplied)
+        {
+            WatchTracked++;
+            TotalReasserts += HonorLevelFixPlayers[j].ReassertCount;
+        }
+        else
+        {
+            ActiveTracked++;
+        }
+    }
 
     foreach WorldInfo.AllControllers(class'ROPlayerController', ROPC)
     {
@@ -624,6 +705,9 @@ function ProbeHonorLevelFixHealth()
         @ "health=" $ HealthState
         @ "players=" $ TotalPlayers
         @ "tracked=" $ HonorLevelFixPlayers.Length
+        @ "active=" $ ActiveTracked
+        @ "watch=" $ WatchTracked
+        @ "reasserts=" $ TotalReasserts
         @ "StatsRead[None=" $ StatsReadNone $ ",Done=" $ StatsReadDone $ ",NotDone=" $ StatsReadNotDone $ "]"
         @ "StatsWriteNone=" $ StatsWriteNone
         @ "persistent_unhealthy=" $ PersistentUnhealthy
