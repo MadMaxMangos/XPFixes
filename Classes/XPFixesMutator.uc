@@ -36,7 +36,7 @@ var config float HonorLevelFixTimeout;
 var config int HonorLevelFixOutageThreshold;
 var config float HonorLevelFixHealthProbeInterval;
 var config int HonorLevelFixHealthProbeDegradedThreshold;
-var config float HonorLevelFixWatchWindow;
+var config int HonorLevelFixRegressionLogThreshold;
 
 struct HonorLevelFixTrack
 {
@@ -240,7 +240,7 @@ function SyncRuntimeSettingsFromClassDefaults()
     HonorLevelFixOutageThreshold = class'XPFixesMutator'.default.HonorLevelFixOutageThreshold;
     HonorLevelFixHealthProbeInterval = class'XPFixesMutator'.default.HonorLevelFixHealthProbeInterval;
     HonorLevelFixHealthProbeDegradedThreshold = class'XPFixesMutator'.default.HonorLevelFixHealthProbeDegradedThreshold;
-    HonorLevelFixWatchWindow = class'XPFixesMutator'.default.HonorLevelFixWatchWindow;
+    HonorLevelFixRegressionLogThreshold = class'XPFixesMutator'.default.HonorLevelFixRegressionLogThreshold;
 }
 
 function PreBeginPlay()
@@ -264,7 +264,7 @@ simulated event PostBeginPlay()
         @ "HonorLevelFixOutageThreshold=" $ class'XPFixesMutator'.default.HonorLevelFixOutageThreshold
         @ "HonorLevelFixHealthProbeInterval=" $ class'XPFixesMutator'.default.HonorLevelFixHealthProbeInterval
         @ "HonorLevelFixHealthProbeDegradedThreshold=" $ class'XPFixesMutator'.default.HonorLevelFixHealthProbeDegradedThreshold
-        @ "HonorLevelFixWatchWindow=" $ class'XPFixesMutator'.default.HonorLevelFixWatchWindow
+        @ "HonorLevelFixRegressionLogThreshold=" $ class'XPFixesMutator'.default.HonorLevelFixRegressionLogThreshold
     );
 
     `xpflog("config runtime:"
@@ -278,7 +278,7 @@ simulated event PostBeginPlay()
         @ "HonorLevelFixOutageThreshold=" $ HonorLevelFixOutageThreshold
         @ "HonorLevelFixHealthProbeInterval=" $ HonorLevelFixHealthProbeInterval
         @ "HonorLevelFixHealthProbeDegradedThreshold=" $ HonorLevelFixHealthProbeDegradedThreshold
-        @ "HonorLevelFixWatchWindow=" $ HonorLevelFixWatchWindow
+        @ "HonorLevelFixRegressionLogThreshold=" $ HonorLevelFixRegressionLogThreshold
     );
 
     if (bFixHonorLevel && HonorLevelFixHealthProbeInterval > 0.0)
@@ -337,14 +337,14 @@ function int GetHonorLevelFixHealthProbeDegradedThreshold()
     return 2;
 }
 
-function float GetHonorLevelFixWatchWindow()
+function int GetHonorLevelFixRegressionLogThreshold()
 {
-    if (HonorLevelFixWatchWindow > 0.0)
+    if (HonorLevelFixRegressionLogThreshold > 0)
     {
-        return HonorLevelFixWatchWindow;
+        return HonorLevelFixRegressionLogThreshold;
     }
 
-    return 30.0;
+    return 3;
 }
 
 function NoteHonorLevelFixHealthy()
@@ -432,41 +432,39 @@ function PollHonorLevelFix()
             continue;
         }
 
-        // Post-fix watch: after we apply a correction, we don't remove the
-        // player — we keep watching for a regression caused by the game's
-        // unconditional UpdateStats -> SetHonorLevel clobber path. If the PRI
-        // goes back to 0/255 inside the watch window, re-assert and log.
+        // Post-fix watch: after we apply a correction we keep polling the player
+        // indefinitely to catch and re-assert if the game's UpdateStats ->
+        // SetHonorLevel path clobbers the PRI back to 0/255. Entry is only
+        // dropped when the player disconnects. Regression logging is throttled
+        // — first N loud, then silent re-assert — with a final summary in
+        // NotifyLogout.
         if (HonorLevelFixPlayers[i].bFixApplied)
         {
-            if (WorldInfo.TimeSeconds - HonorLevelFixPlayers[i].FixAppliedTime > GetHonorLevelFixWatchWindow())
-            {
-                if (HonorLevelFixPlayers[i].ReassertCount > 0)
-                {
-                    `xpfok("HonorLevel fix watch complete for"
-                        @ ROPC.PlayerReplicationInfo.PlayerName
-                        @ "SteamId64" @ ROPRI.SteamId64
-                        @ "reasserts=" $ HonorLevelFixPlayers[i].ReassertCount
-                        @ "final_level=" $ ROPRI.HonorLevel
-                    );
-                }
-                RemoveHonorLevelFixPlayer(i);
-                continue;
-            }
-
             if (ROPRI.HonorLevel == 0 || ROPRI.HonorLevel == 255)
             {
-                `xpfwarn("HonorLevel fix REGRESSION for"
-                    @ ROPC.PlayerReplicationInfo.PlayerName
-                    @ "SteamId64" @ ROPRI.SteamId64
-                    @ "PRI.HonorLevel=" $ ROPRI.HonorLevel
-                    @ "was_set_to=" $ HonorLevelFixPlayers[i].FixAppliedLevel
-                    @ "time_since_fix=" $ (WorldInfo.TimeSeconds - HonorLevelFixPlayers[i].FixAppliedTime)
-                    @ "prior_reasserts=" $ HonorLevelFixPlayers[i].ReassertCount
-                    @ "StatsRead=" $ (ROPC.StatsRead != None ? "present" : "None")
-                    @ "ReadState=" $ (ROPC.StatsRead != None ? GetStatsReadStateName(ROPC.StatsRead.UserStatsReceivedState) : "N/A")
-                    @ "StatsWrite=" $ (ROPC.StatsWrite != None ? "present" : "None")
-                    @ "StatsWrite.HonorLevel=" $ (ROPC.StatsWrite != None ? string(ROPC.StatsWrite.HonorLevel) : "N/A")
-                );
+                if (HonorLevelFixPlayers[i].ReassertCount < GetHonorLevelFixRegressionLogThreshold())
+                {
+                    `xpfwarn("HonorLevel fix REGRESSION for"
+                        @ ROPC.PlayerReplicationInfo.PlayerName
+                        @ "SteamId64" @ ROPRI.SteamId64
+                        @ "PRI.HonorLevel=" $ ROPRI.HonorLevel
+                        @ "was_set_to=" $ HonorLevelFixPlayers[i].FixAppliedLevel
+                        @ "time_since_fix=" $ (WorldInfo.TimeSeconds - HonorLevelFixPlayers[i].FixAppliedTime)
+                        @ "prior_reasserts=" $ HonorLevelFixPlayers[i].ReassertCount
+                        @ "StatsRead=" $ (ROPC.StatsRead != None ? "present" : "None")
+                        @ "ReadState=" $ (ROPC.StatsRead != None ? GetStatsReadStateName(ROPC.StatsRead.UserStatsReceivedState) : "N/A")
+                        @ "StatsWrite=" $ (ROPC.StatsWrite != None ? "present" : "None")
+                        @ "StatsWrite.HonorLevel=" $ (ROPC.StatsWrite != None ? string(ROPC.StatsWrite.HonorLevel) : "N/A")
+                    );
+                }
+                else if (HonorLevelFixPlayers[i].ReassertCount == GetHonorLevelFixRegressionLogThreshold())
+                {
+                    `xpfwarn("HonorLevel fix REGRESSION throttle reached for"
+                        @ ROPC.PlayerReplicationInfo.PlayerName
+                        @ "SteamId64" @ ROPRI.SteamId64
+                        @ "- further regressions will be silent; re-asserting indefinitely until disconnect"
+                    );
+                }
                 ROPRI.HonorLevel = HonorLevelFixPlayers[i].FixAppliedLevel;
                 HonorLevelFixPlayers[i].ReassertCount++;
             }
@@ -789,6 +787,18 @@ function NotifyLogout(Controller Exiting)
     Index = FindHonorLevelFixPlayer(ROPC);
     if (Index != INDEX_NONE)
     {
+        if (HonorLevelFixPlayers[Index].bFixApplied
+            && HonorLevelFixPlayers[Index].ReassertCount > 0
+            && ROPC.PlayerReplicationInfo != None)
+        {
+            `xpfok("HonorLevel fix final summary for"
+                @ ROPC.PlayerReplicationInfo.PlayerName
+                @ "SteamId64" @ ROPlayerReplicationInfo(ROPC.PlayerReplicationInfo).SteamId64
+                @ "reasserts=" $ HonorLevelFixPlayers[Index].ReassertCount
+                @ "duration=" $ (WorldInfo.TimeSeconds - HonorLevelFixPlayers[Index].FixAppliedTime)
+                @ "final_level=" $ ROPlayerReplicationInfo(ROPC.PlayerReplicationInfo).HonorLevel
+            );
+        }
         RemoveHonorLevelFixPlayer(Index);
     }
 
@@ -815,6 +825,25 @@ function NotifyLogout(Controller Exiting)
     }
 
     super.NotifyLogout(Exiting);
+}
+
+// Defensive shutdown on map change / level teardown. Engine will normally
+// destroy the mutator actor and auto-clear timers, but explicitly clearing
+// them and dropping controller refs guards against seamless travel or any
+// scenario where a stale timer could fire against dead objects.
+simulated event Destroyed()
+{
+    ClearTimer('PollHonorLevelFix');
+    ClearTimer('PollEpicStatsDebug');
+    ClearTimer('ProbeHonorLevelFixHealth');
+
+    HonorLevelFixPlayers.Length = 0;
+    DebugEpicPlayers.Length = 0;
+    HonorLevelFixLastUnhealthy.Length = 0;
+
+    `xpflog("shutdown: timers cleared, tracking arrays emptied");
+
+    super.Destroyed();
 }
 
 `if(`isdefined(XPFIXES_DEBUG))
